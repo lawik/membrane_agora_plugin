@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -17,16 +18,24 @@ using namespace agora::rtc;
 
 class ConnectionObserver : public IRtcConnectionObserver {
 public:
+  // How long `create` waits for the connection to be established. `connect`
+  // is asynchronous and may never report success (e.g. expired token, wrong
+  // app id or channel, Agora unreachable), and the NIF runs on a dirty
+  // scheduler, so the wait must be bounded.
+  static constexpr std::chrono::seconds CONNECT_TIMEOUT{15};
+
   ConnectionObserver(agora_refptr<IRtcConnection> connection)
-      : _is_connected(false), _connection(connection),
+      : _is_connected(false), _is_failed(false), _connection(connection),
         _destination(std::nullopt) {}
 
   ConnectionObserver(agora_refptr<IRtcConnection> connection,
                      UnifexPid destination)
-      : _is_connected(false), _connection(connection),
+      : _is_connected(false), _is_failed(false), _connection(connection),
         _destination(destination) {}
 
-  void waitUntilConnected();
+  // Blocks until the connection is established, fails or `timeout` elapses.
+  // Returns true only if the connection was established.
+  bool waitUntilConnected(std::chrono::milliseconds timeout = CONNECT_TIMEOUT);
 
 public: // IRtcConnectionObserver
   void onConnected(const TConnectionInfo &connectionInfo,
@@ -65,7 +74,10 @@ public: // IRtcConnectionObserver
   void onChannelMediaRelayStateChanged(int state, int code) override;
 
 private:
+  void signalConnectionResult(bool connected);
+
   std::atomic<bool> _is_connected;
+  std::atomic<bool> _is_failed;
   std::condition_variable _cv;
   std::mutex _lock;
   agora_refptr<IRtcConnection> _connection;

@@ -48,10 +48,19 @@ UNIFEX_TERM create(UnifexEnv *env, char *appId, char *token, char *channelId,
   int connection_res = state->connection->connect(token, channelId, userId);
   if (connection_res) {
     AG_LOG(ERROR, "Failed to connect to Agora channel!");
+    state->connection->unregisterObserver(connObserver.get());
     unifex_release_state(env, state);
     return create_result_error(env, "Failed to connect to Agora channel!");
   }
-  connObserver->waitUntilConnected();
+  // `connect` only means the request was accepted; wait (with a timeout) for
+  // the connection to be established or to fail, instead of blocking the dirty
+  // scheduler forever on e.g. an expired token
+  if (!connObserver->waitUntilConnected()) {
+    AG_LOG(ERROR, "Failed to connect to Agora channel!");
+    state->connection->unregisterObserver(connObserver.get());
+    unifex_release_state(env, state);
+    return create_result_error(env, "Failed to connect to Agora channel!");
+  }
 
   // senders creation
   agora::agora_refptr<agora::rtc::IMediaNodeFactory> factory =

@@ -1,11 +1,25 @@
 #include "./_generated/source.h"
 #include "connection_observer.h"
 
-void ConnectionObserver::waitUntilConnected() {
+bool ConnectionObserver::waitUntilConnected(std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> unique_lock(_lock);
-  while (!_is_connected) {
-    _cv.wait(unique_lock);
+  bool finished = _cv.wait_for(unique_lock, timeout,
+                               [this] { return _is_connected || _is_failed; });
+  if (!finished) {
+    AG_LOG(ERROR, "Timed out waiting for the Agora connection");
+    return false;
   }
+  return _is_connected && !_is_failed;
+}
+
+void ConnectionObserver::signalConnectionResult(bool connected) {
+  std::unique_lock<std::mutex> unique_lock(_lock);
+  if (connected) {
+    _is_connected = true;
+  } else {
+    _is_failed = true;
+  }
+  _cv.notify_all();
 }
 
 void ConnectionObserver::onConnected(
@@ -13,9 +27,7 @@ void ConnectionObserver::onConnected(
     rtc::CONNECTION_CHANGED_REASON_TYPE reason) {
   UNUSED(connectionInfo);
   UNUSED(reason);
-  std::unique_lock<std::mutex> unique_lock(_lock);
-  _is_connected = true;
-  _cv.notify_one();
+  signalConnectionResult(true);
 }
 
 void ConnectionObserver::onConnecting(
@@ -29,7 +41,9 @@ void ConnectionObserver::onDisconnected(
     const rtc::TConnectionInfo &connectionInfo,
     rtc::CONNECTION_CHANGED_REASON_TYPE reason) {
   UNUSED(connectionInfo);
-  UNUSED(reason);
+  AG_LOG(WARNING, "Disconnected from the Agora channel, reason: %d",
+         static_cast<int>(reason));
+  signalConnectionResult(false);
 }
 
 void ConnectionObserver::onReconnecting(
@@ -49,6 +63,8 @@ void ConnectionObserver::onReconnected(
 void ConnectionObserver::onConnectionLost(
     const rtc::TConnectionInfo &connectionInfo) {
   UNUSED(connectionInfo);
+  AG_LOG(WARNING, "Connection to the Agora channel lost");
+  signalConnectionResult(false);
 }
 
 void ConnectionObserver::onLastmileQuality(const rtc::QUALITY_TYPE quality) {
@@ -65,7 +81,9 @@ void ConnectionObserver::onConnectionFailure(
     const rtc::TConnectionInfo &connectionInfo,
     rtc::CONNECTION_CHANGED_REASON_TYPE reason) {
   UNUSED(connectionInfo);
-  UNUSED(reason);
+  AG_LOG(ERROR, "Failed to connect to the Agora channel, reason: %d",
+         static_cast<int>(reason));
+  signalConnectionResult(false);
 }
 
 void ConnectionObserver::onUserJoined(user_id_t userId) {

@@ -48,7 +48,15 @@ UNIFEX_TERM create(UnifexEnv *env, char *appId, char *token, char *channelId,
     return create_result_error(env, "Failed to connect to Agora channel!");
   }
 
-  state->connObserver->waitUntilConnected();
+  // `connect` only means the request was accepted; wait (with a timeout) for
+  // the connection to be established or to fail, instead of blocking the dirty
+  // scheduler forever on e.g. an expired token. The observer is unregistered
+  // when the state is destroyed.
+  if (!state->connObserver->waitUntilConnected()) {
+    AG_LOG(ERROR, "Failed to connect to Agora channel!");
+    unifex_release_state(env, state);
+    return create_result_error(env, "Failed to connect to Agora channel!");
+  }
 
   agora::rtc::VideoSubscriptionOptions options;
   state->connection->getLocalUser()->subscribeAllVideo(options);

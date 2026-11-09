@@ -43,6 +43,17 @@ defmodule Membrane.Agora.Dispatcher do
                 Otherwise, if there is no corresponding pad available, the buffers are discarded.
                 Defaults to true.
                 """
+              ],
+              max_queued_buffers: [
+                spec: pos_integer(),
+                default: 1000,
+                description: """
+                Maximum number of buffers queued per user while waiting for the corresponding pad
+                to be connected (see `queue_before_pad_connected?`). When the limit is reached,
+                the oldest queued buffers are dropped, so a user whose pad is never connected
+                cannot make the queue grow without bounds.
+                Defaults to 1000.
+                """
               ]
 
   @impl true
@@ -51,6 +62,7 @@ defmodule Membrane.Agora.Dispatcher do
      %{
        output_pads: %{},
        queue_before_pad_connected?: opts.queue_before_pad_connected?,
+       max_queued_buffers: opts.max_queued_buffers,
        stream_format: nil
      }}
   end
@@ -100,24 +112,45 @@ defmodule Membrane.Agora.Dispatcher do
 
     buffer_actions =
       Enum.reverse(state.output_pads[user_id].buffered)
-      |> Enum.map(&{Pad.ref(:output, user_id), &1})
+      |> Enum.map(&{:buffer, {Pad.ref(:output, user_id), &1}})
+
+    state =
+      update_in(state, [:output_pads, user_id], &%{&1 | buffered: [], buffered_size: 0})
 
     {notify_child_actions ++ stream_format_actions ++ buffer_actions, state}
   end
 
   defp add_pad(state, user_id) do
-    put_in(state, [:output_pads, user_id], %{buffered: [], is_connected: false})
+    put_in(state, [:output_pads, user_id], %{
+      buffered: [],
+      buffered_size: 0,
+      dropped: 0,
+      is_connected: false
+    })
   end
 
-  defp buffer_up(%{queue_before_pad_connected?: true} = state, _buffer) do
+  defp buffer_up(%{queue_before_pad_connected?: false} = state, _buffer) do
     state
   end
 
   defp buffer_up(state, buffer) do
     user_id = buffer.metadata.id
 
-    update_in(state, [:output_pads, user_id, :buffered], fn buffered ->
-      [buffer | buffered]
+    update_in(state, [:output_pads, user_id], fn
+      %{buffered_size: size} = output_pad when size < state.max_queued_buffers ->
+        %{output_pad | buffered: [buffer | output_pad.buffered], buffered_size: size + 1}
+
+      %{dropped: dropped} = output_pad ->
+        if dropped == 0 do
+          Membrane.Logger.warning("""
+          Reached the limit of #{state.max_queued_buffers} buffers queued for user #{inspect(user_id)} \
+          while waiting for its output pad to be connected, dropping the oldest buffers.
+          """)
+        end
+
+        # `buffered` holds the newest buffer first, so the oldest one is the last
+        buffered = [buffer | List.delete_at(output_pad.buffered, -1)]
+        %{output_pad | buffered: buffered, dropped: dropped + 1}
     end)
   end
 end
